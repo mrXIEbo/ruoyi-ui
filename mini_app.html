@@ -156,24 +156,38 @@ function fmtAddr(addr) {
   return addr.length > 20 ? addr.slice(0,10)+'...'+addr.slice(-8) : addr;
 }
 
-// ─── 加载 ethers.js（多源兜底） ───
+// ─── 用 <script> 标签加载 ethers.js（多源兜底） ───
+function loadScript(url) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = () => resolve(url);
+    s.onerror = () => { s.remove(); reject(new Error('load fail: ' + url)); };
+    document.head.appendChild(s);
+  });
+}
+
 async function loadEthers() {
+  // 优先国内 CDN
   const cdnList = [
-    'https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js',
-    'https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js',
     'https://cdn.bootcdn.net/ajax/libs/ethers/5.7.2/ethers.umd.min.js',
+    'https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js',
+    'https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js',
   ];
 
   for (const url of cdnList) {
     try {
       setStatus('加载签名组件...', 'info');
-      const mod = await import(url);
-      // UMD 模块通过 window.Ethers 或 mod.default 暴露
-      ethers = window.Ethers || mod.default || mod;
-      if (ethers && typeof ethers.utils.parseEther === 'function') {
+      await loadScript(url);
+      // UMD 通过 window.ethers 暴露
+      ethers = window.ethers;
+      if (ethers && ethers.utils && typeof ethers.utils.parseEther === 'function') {
         console.log('ethers loaded from:', url);
         return;
       }
+      // 加载了但全局变量不对，清理重试
+      ethers = null;
     } catch(e) {
       console.warn('CDN failed:', url, e.message);
     }
