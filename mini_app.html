@@ -277,18 +277,9 @@ async function sign() {
         chainId: txData.chainId,
         type: 2, // EIP-1559
       };
-      const rawTx = ethers.utils.serializeTransaction(txRequest);
       const signature = await signer.signTransaction(txRequest);
-      const signedTx = ethers.utils.concat([
-        ethers.utils.zeroPad(ethers.utils.hexlify(txData.chainId), 32),
-        ethers.utils.arrayify('0x' + rawTx.slice(2).replace(/^184.+?(?=0)/, '')),
-        ethers.utils.arrayify(signature)
-      ]).map(x=>('0'+x.toString(16)).slice(-2)).join('');
-
-      // 简化：用 ethereumjs-utils 方式重建签名tx (RLP)
-      const rlp = require_RLP();
-      const signedHex = rlp.serialize(txRequest, signature);
-      showResult('0x' + signedHex.toString('hex'));
+      const signedHex = ethers.utils.serializeTransaction(txRequest, signature);
+      showResult(signedHex);
     } else {
       // USDT ERC20
       const usdtContract = txData.token === 'BNB'
@@ -312,9 +303,9 @@ async function sign() {
         type: 2,
       };
 
-      // 签名
-      const signedTx = await signer.sendTransaction(txRequest);
-      showResult(signedTx.rawTransaction || signedTx.hash);
+      // 签名后返回签名 hex（不广播）
+      const signedTx = await signer.signTransaction(txRequest);
+      showResult(signedTx);
     }
   } catch(e) {
     if (e.code === 4001 || e.code === 'ACTION_REJECTED') {
