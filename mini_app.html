@@ -35,6 +35,7 @@
     padding: 8px 0;
     border-bottom: 1px solid #2d2d5a;
     font-size: 14px;
+    align-items: center;
   }
   .row:last-child { border-bottom: none; }
   .label { color: #888; }
@@ -66,7 +67,6 @@
   .btn-primary { background: #6c5ce7; color: #fff; }
   .btn-success { background: #00b894; color: #fff; }
   .btn-danger  { background: #d63031; color: #fff; }
-  .btn-outline { background: transparent; color: #6c5ce7; border: 2px solid #6c5ce7; }
 
   #signed-hex-wrap { display: none; margin-top: 10px; }
   #signed-hex-wrap textarea {
@@ -100,7 +100,6 @@
 <h2>🔐 签名授权</h2>
 <div class="subtitle" id="subtitle">连接钱包后签名转账交易</div>
 
-<!-- 交易摘要 -->
 <div class="card" id="tx-card" style="display:none">
   <div class="row">
     <span class="label">链</span>
@@ -139,16 +138,8 @@
   返回 Telegram 粘贴发送即可。
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@metamask/detect-provider@2.0.0/dist/metamask.detectprovider.min.js"></script>
-<script type="module">
-import { ethers } from "https://cdn.ethers.io/lib/ethers-5.7.2.esm.min.js";
-
-// ─── 解析 URL 参数 ───
-function getParam(key) {
-  const params = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
-  return params.get(key);
-}
-
+<script>
+let ethers = null;
 let txData = null;
 let signer = null;
 let provider = null;
@@ -165,7 +156,42 @@ function fmtAddr(addr) {
   return addr.length > 20 ? addr.slice(0,10)+'...'+addr.slice(-8) : addr;
 }
 
+// ─── 加载 ethers.js（多源兜底） ───
+async function loadEthers() {
+  const cdnList = [
+    'https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js',
+    'https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js',
+    'https://cdn.bootcdn.net/ajax/libs/ethers/5.7.2/ethers.umd.min.js',
+  ];
+
+  for (const url of cdnList) {
+    try {
+      setStatus('加载签名组件...', 'info');
+      const mod = await import(url);
+      // UMD 模块通过 window.Ethers 或 mod.default 暴露
+      ethers = window.Ethers || mod.default || mod;
+      if (ethers && typeof ethers.utils.parseEther === 'function') {
+        console.log('ethers loaded from:', url);
+        return;
+      }
+    } catch(e) {
+      console.warn('CDN failed:', url, e.message);
+    }
+  }
+  throw new Error('无法加载 ethers.js，请检查网络连接');
+}
+
+// ─── 解析 URL 参数 ───
+function getParam(key) {
+  const params = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
+  return params.get(key);
+}
+
 async function init() {
+  // 1. 加载 ethers
+  await loadEthers();
+
+  // 2. 解析交易参数
   const encoded = getParam('tx');
   if (!encoded) {
     setStatus('⚠️ 未找到交易参数，请从 Telegram 重新发起', 'err');
@@ -173,16 +199,13 @@ async function init() {
   }
 
   try {
-    const json = atob(encoded);
-    txData = JSON.parse(json);
+    txData = JSON.parse(atob(encoded));
   } catch(e) {
     try {
-      // 尝试 base64url
       const padded = encoded.replace(/-/g, '+').replace(/_/g, '/');
-      const json = atob(padded);
-      txData = JSON.parse(json);
+      txData = JSON.parse(atob(padded));
     } catch(e2) {
-      setStatus('⚠️ 交易参数解析失败: ' + e.message, 'err');
+      setStatus('⚠️ 交易参数解析失败', 'err');
       return;
     }
   }
@@ -198,29 +221,23 @@ async function init() {
 }
 
 async function connect() {
+  if (!window.ethereum) {
+    setStatus('⚠️ 未检测到 MetaMask，请先安装 MetaMask 插件', 'err');
+    return;
+  }
+
   setStatus('正在打开 MetaMask...', 'info');
   try {
-    // 尝试新版 window.ethereum
-    if (window.ethereum) {
-      provider = new ethers.providers.Web3Provider(window.ethereum, 'any');
-      await provider.send('eth_requestAccounts', []);
-    } else {
-      // 兜底 detect-provider
-      const detected = await detectEthereumProvider({ mustBeMetaMask: true });
-      if (!detected) {
-        setStatus('⚠️ 未检测到 MetaMask，请安装后重试', 'err');
-        return;
-      }
-      provider = new ethers.providers.Web3Provider(detected, 'any');
-      await provider.send('eth_requestAccounts', []);
-    }
+    provider = new ethers.providers.Web3Provider(window.ethereum);
+    await provider.send('eth_requestAccounts', []);
 
     signer = provider.getSigner();
     const addr = await signer.getAddress();
+
     document.getElementById('btn-connect').disabled = true;
     document.getElementById('btn-connect').textContent = '✅ 已连接: ' + fmtAddr(addr);
     document.getElementById('btn-sign').disabled = false;
-    setStatus('✅ MetaMask 已连接，地址：' + addr, 'ok');
+    setStatus('✅ MetaMask 已连接：' + addr, 'ok');
   } catch(e) {
     if (e.code === 4001) {
       setStatus('⚠️ 用户拒绝连接', 'err');
@@ -240,76 +257,79 @@ async function sign() {
   document.getElementById('btn-sign').disabled = true;
 
   try {
-    const chain = txData.chain;
-    const from = txData.from;
-    const to = txData.to;
+    const chain  = txData.chain;
+    const from   = txData.from;
+    const to     = txData.to;
     const amount = txData.amount;
-    const token = txData.token;
+    const token  = txData.token;
 
-    // 检查当前连接的链
-    const network = await provider.getNetwork();
-    const chainIds = { 'ETH': 1, 'BSC': 56 };
-    const expectedChain = chainIds[chain];
-    if (expectedChain && Number(network.chainId) !== expectedChain) {
-      const chainNames = { 1: 'Ethereum', 56: 'BSC' };
-      setStatus(`⚠️ 请先切换 MetaMask 到 ${chainNames[expectedChain]} 网络，当前: ${network.chainId}`, 'err');
-      document.getElementById('btn-sign').disabled = false;
-      return;
+    // 验证链
+    const expectedChain = { 'ETH': 1, 'BSC': 56 }[chain];
+    if (expectedChain) {
+      const network = await provider.getNetwork();
+      if (Number(network.chainId) !== expectedChain) {
+        setStatus(`⚠️ 请先切换 MetaMask 到 ${chain} 网络（ID: ${expectedChain}）`, 'err');
+        document.getElementById('btn-sign').disabled = false;
+        return;
+      }
     }
 
-    // 检查发款地址
+    // 验证地址
     const connectedAddr = (await signer.getAddress()).toLowerCase();
     if (connectedAddr !== from.toLowerCase()) {
-      setStatus(`⚠️ 当前连接的钱包地址与发款地址不匹配\n发款：${from}\n连接：${connectedAddr}`, 'err');
+      setStatus(`⚠️ 钱包地址与发款地址不匹配\n发款：${from}\n连接：${connectedAddr}`, 'err');
       document.getElementById('btn-sign').disabled = false;
       return;
     }
 
+    const txCount = await provider.getTransactionCount(from, 'latest');
+    const gasPrice = await provider.getGasPrice();
+    const chainId = parseInt(txData.chainId);
+
     if (token === 'ETH' || token === 'BNB') {
-      // 原生币签名
+      // ── 原生币 ──
       const txRequest = {
         from,
         to,
-        value: ethers.utils.parseUnits(amount.toString(), 18),
-        nonce: await provider.getTransactionCount(from, 'latest'),
-        gasLimit: ethers.utils.parseUnits('21000', 0),
-        gasPrice: await provider.getGasPrice(),
-        chainId: txData.chainId,
-        type: 2, // EIP-1559
+        value: ethers.utils.parseEther(amount.toString()),
+        nonce: txCount,
+        gasLimit: 21000,
+        gasPrice: gasPrice,
+        chainId: chainId,
       };
       const signature = await signer.signTransaction(txRequest);
       const signedHex = ethers.utils.serializeTransaction(txRequest, signature);
       showResult(signedHex);
     } else {
-      // USDT ERC20
-      const usdtContract = txData.token === 'BNB'
-        ? '0x55d398326f99059ff775485246999027b3197955' // BSC USDT
-        : '0xdac17f958d2ee523a2206206994597c13d831ec7'; // ETH USDT
+      // ── USDT ERC20 ──
+      const usdtContract = chain === 'BSC'
+        ? '0x55d398326f99059ff775485246999027b3197955'
+        : '0xdac17f958d2ee523a2206206994597c13d831ec7';
 
       const iface = new ethers.utils.Interface([
-        'function transfer(address to, uint amount) returns (bool)'
+        'function transfer(address to, uint amount) public'
       ]);
-      const data = iface.encodeFunctionData('transfer', [to, ethers.utils.parseUnits(amount.toString(), 6)]);
+      // USDT 是 6 位小数
+      const tokenAmount = ethers.utils.parseUnits(amount.toString(), 6);
+      const data = iface.encodeFunctionData('transfer', [to, tokenAmount]);
 
       const txRequest = {
         from,
         to: usdtContract,
-        value: '0x0',
+        value: ethers.constants.Zero,
         data,
-        nonce: await provider.getTransactionCount(from, 'latest'),
-        gasLimit: ethers.utils.parseUnits('100000', 0),
-        gasPrice: await provider.getGasPrice(),
-        chainId: txData.chainId,
-        type: 2,
+        nonce: txCount,
+        gasLimit: 100000,
+        gasPrice: gasPrice,
+        chainId: chainId,
       };
-
-      // 签名后返回签名 hex（不广播）
       const signedTx = await signer.signTransaction(txRequest);
       showResult(signedTx);
     }
   } catch(e) {
+    console.error(e);
     if (e.code === 4001 || e.code === 'ACTION_REJECTED') {
-      setStatus('⚠️ 用户拒绝签名', 'err');
+      setStatus('⚠️ 用户取消签名', 'err');
     } else {
       setStatus('⚠️ 签名失败: ' + e.message, 'err');
     }
@@ -321,24 +341,11 @@ function showResult(hex) {
   setStatus('✅ 签名成功！', 'ok');
   document.getElementById('signed-hex').value = hex;
   document.getElementById('signed-hex-wrap').style.display = 'block';
-
-  // 自动复制
   navigator.clipboard.writeText(hex).then(() => {
-    setStatus('✅ 签名成功！HEX 已复制到剪贴板，返回 Telegram 粘贴发送', 'ok');
+    setStatus('✅ 签名成功！HEX 已复制到剪贴板，返回 Telegram 粘贴', 'ok');
   }).catch(() => {
-    setStatus('✅ 签名成功！请手动复制上方 HEX 返回 Telegram 粘贴发送', 'ok');
+    setStatus('✅ 签名成功！请手动复制 HEX 返回 Telegram', 'ok');
   });
-}
-
-// 简单的 RLP 打包（用于 ETH 原生签名）
-function require_RLP() {
-  const RLP = {};
-  RLP.serialize = function(tx, signature) {
-    // 使用 ethers 序列化
-    const allBytes = ethers.utils.serializeTransaction(tx, signature);
-    return allBytes;
-  };
-  return RLP;
 }
 
 init().catch(e => setStatus('初始化错误: ' + e.message, 'err'));
