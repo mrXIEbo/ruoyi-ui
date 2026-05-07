@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>签名授权</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h2 { color: #6c5ce7; margin-bottom: 4px; font-size: 18px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+
+  .card {
+    background: #16213e;
+    border-radius: 12px;
+    padding: 16px;
+    width: 100%;
+    max-width: 420px;
+    margin-bottom: 16px;
+    border: 1px solid #2d2d5a;
+  }
+
+  .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid #2d2d5a;
+    font-size: 14px;
+  }
+  .row:last-child { border-bottom: none; }
+  .label { color: #888; }
+  .value { color: #e0e0e0; font-family: monospace; font-size: 12px; word-break: break-all; text-align: right; max-width: 60%; }
+
+  .chain-badge {
+    display: inline-block;
+    background: #6c5ce7;
+    color: #fff;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: bold;
+  }
+
+  .btn {
+    width: 100%;
+    max-width: 420px;
+    padding: 14px;
+    border: none;
+    border-radius: 10px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    margin-bottom: 10px;
+    transition: opacity .2s;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: #6c5ce7; color: #fff; }
+  .btn-success { background: #00b894; color: #fff; }
+  .btn-danger  { background: #d63031; color: #fff; }
+  .btn-outline { background: transparent; color: #6c5ce7; border: 2px solid #6c5ce7; }
+
+  #signed-hex-wrap { display: none; margin-top: 10px; }
+  #signed-hex-wrap textarea {
+    width: 100%; min-height: 80px; background: #0d0d2b;
+    color: #a8ff78; border: 1px solid #2d2d5a;
+    border-radius: 8px; padding: 10px; font-family: monospace;
+    font-size: 12px; resize: vertical; outline: none;
+  }
+
+  #status { text-align: center; font-size: 13px; margin: 10px 0; min-height: 20px; }
+  .status-ok { color: #00b894; }
+  .status-err { color: #d63031; }
+  .status-info { color: #74b9ff; }
+
+  .note {
+    background: #0d0d2b;
+    border-left: 3px solid #6c5ce7;
+    padding: 10px 12px;
+    border-radius: 0 8px 8px 0;
+    font-size: 12px;
+    color: #aaa;
+    line-height: 1.6;
+    margin-top: 10px;
+    width: 100%;
+    max-width: 420px;
+  }
+</style>
+</head>
+<body>
+
+<h2>🔐 签名授权</h2>
+<div class="subtitle" id="subtitle">连接钱包后签名转账交易</div>
+
+<!-- 交易摘要 -->
+<div class="card" id="tx-card" style="display:none">
+  <div class="row">
+    <span class="label">链</span>
+    <span class="value"><span class="chain-badge" id="tx-chain"></span></span>
+  </div>
+  <div class="row">
+    <span class="label">代币</span>
+    <span class="value" id="tx-token"></span>
+  </div>
+  <div class="row">
+    <span class="label">发款地址</span>
+    <span class="value" id="tx-from"></span>
+  </div>
+  <div class="row">
+    <span class="label">收款地址</span>
+    <span class="value" id="tx-to"></span>
+  </div>
+  <div class="row">
+    <span class="label">金额</span>
+    <span class="value" id="tx-amount"></span>
+  </div>
+</div>
+
+<div id="status"></div>
+
+<button class="btn btn-primary" id="btn-connect" onclick="connect()">🔗 连接 MetaMask</button>
+<button class="btn btn-success" id="btn-sign" disabled onclick="sign()">✍️ 签名交易</button>
+
+<div id="signed-hex-wrap">
+  <label style="font-size:13px;color:#888;margin-bottom:4px;display:block">✅ 签名结果（已复制到剪贴板）：</label>
+  <textarea id="signed-hex" readonly></textarea>
+</div>
+
+<div class="note">
+  💡 签名后，请复制上方显示的 HEX 数据，<br>
+  返回 Telegram 粘贴发送即可。
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@metamask/detect-provider@2.0.0/dist/metamask.detectprovider.min.js"></script>
+<script type="module">
+import { ethers } from "https://cdn.ethers.io/lib/ethers-5.7.2.esm.min.js";
+
+// ─── 解析 URL 参数 ───
+function getParam(key) {
+  const params = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
+  return params.get(key);
+}
+
+let txData = null;
+let signer = null;
+let provider = null;
+
+const statusEl = document.getElementById('status');
+
+function setStatus(msg, type='') {
+  statusEl.textContent = msg;
+  statusEl.className = type ? 'status-' + type : '';
+}
+
+function fmtAddr(addr) {
+  if (!addr) return '';
+  return addr.length > 20 ? addr.slice(0,10)+'...'+addr.slice(-8) : addr;
+}
+
+async function init() {
+  const encoded = getParam('tx');
+  if (!encoded) {
+    setStatus('⚠️ 未找到交易参数，请从 Telegram 重新发起', 'err');
+    return;
+  }
+
+  try {
+    const json = atob(encoded);
+    txData = JSON.parse(json);
+  } catch(e) {
+    try {
+      // 尝试 base64url
+      const padded = encoded.replace(/-/g, '+').replace(/_/g, '/');
+      const json = atob(padded);
+      txData = JSON.parse(json);
+    } catch(e2) {
+      setStatus('⚠️ 交易参数解析失败: ' + e.message, 'err');
+      return;
+    }
+  }
+
+  document.getElementById('tx-card').style.display = 'block';
+  document.getElementById('tx-chain').textContent = txData.chain;
+  document.getElementById('tx-token').textContent = txData.token;
+  document.getElementById('tx-from').textContent = fmtAddr(txData.from);
+  document.getElementById('tx-to').textContent = fmtAddr(txData.to);
+  document.getElementById('tx-amount').textContent = txData.amount + ' ' + txData.token;
+
+  setStatus('请先连接 MetaMask', 'info');
+}
+
+async function connect() {
+  setStatus('正在打开 MetaMask...', 'info');
+  try {
+    // 尝试新版 window.ethereum
+    if (window.ethereum) {
+      provider = new ethers.providers.Web3Provider(window.ethereum, 'any');
+      await provider.send('eth_requestAccounts', []);
+    } else {
+      // 兜底 detect-provider
+      const detected = await detectEthereumProvider({ mustBeMetaMask: true });
+      if (!detected) {
+        setStatus('⚠️ 未检测到 MetaMask，请安装后重试', 'err');
+        return;
+      }
+      provider = new ethers.providers.Web3Provider(detected, 'any');
+      await provider.send('eth_requestAccounts', []);
+    }
+
+    signer = provider.getSigner();
+    const addr = await signer.getAddress();
+    document.getElementById('btn-connect').disabled = true;
+    document.getElementById('btn-connect').textContent = '✅ 已连接: ' + fmtAddr(addr);
+    document.getElementById('btn-sign').disabled = false;
+    setStatus('✅ MetaMask 已连接，地址：' + addr, 'ok');
+  } catch(e) {
+    if (e.code === 4001) {
+      setStatus('⚠️ 用户拒绝连接', 'err');
+    } else {
+      setStatus('⚠️ 连接失败: ' + e.message, 'err');
+    }
+  }
+}
+
+async function sign() {
+  if (!provider || !signer) {
+    setStatus('⚠️ 请先连接钱包', 'err');
+    return;
+  }
+
+  setStatus('请在 MetaMask 中确认签名...', 'info');
+  document.getElementById('btn-sign').disabled = true;
+
+  try {
+    const chain = txData.chain;
+    const from = txData.from;
+    const to = txData.to;
+    const amount = txData.amount;
+    const token = txData.token;
+
+    // 检查当前连接的链
+    const network = await provider.getNetwork();
+    const chainIds = { 'ETH': 1, 'BSC': 56 };
+    const expectedChain = chainIds[chain];
+    if (expectedChain && Number(network.chainId) !== expectedChain) {
+      const chainNames = { 1: 'Ethereum', 56: 'BSC' };
+      setStatus(`⚠️ 请先切换 MetaMask 到 ${chainNames[expectedChain]} 网络，当前: ${network.chainId}`, 'err');
+      document.getElementById('btn-sign').disabled = false;
+      return;
+    }
+
+    // 检查发款地址
+    const connectedAddr = (await signer.getAddress()).toLowerCase();
+    if (connectedAddr !== from.toLowerCase()) {
+      setStatus(`⚠️ 当前连接的钱包地址与发款地址不匹配\n发款：${from}\n连接：${connectedAddr}`, 'err');
+      document.getElementById('btn-sign').disabled = false;
+      return;
+    }
+
+    if (token === 'ETH' || token === 'BNB') {
+      // 原生币签名
+      const txRequest = {
+        from,
+        to,
+        value: ethers.utils.parseUnits(amount.toString(), 18),
+        nonce: await provider.getTransactionCount(from, 'latest'),
+        gasLimit: ethers.utils.parseUnits('21000', 0),
+        gasPrice: await provider.getGasPrice(),
+        chainId: txData.chainId,
+        type: 2, // EIP-1559
+      };
+      const rawTx = ethers.utils.serializeTransaction(txRequest);
+      const signature = await signer.signTransaction(txRequest);
+      const signedTx = ethers.utils.concat([
+        ethers.utils.zeroPad(ethers.utils.hexlify(txData.chainId), 32),
+        ethers.utils.arrayify('0x' + rawTx.slice(2).replace(/^184.+?(?=0)/, '')),
+        ethers.utils.arrayify(signature)
+      ]).map(x=>('0'+x.toString(16)).slice(-2)).join('');
+
+      // 简化：用 ethereumjs-utils 方式重建签名tx (RLP)
+      const rlp = require_RLP();
+      const signedHex = rlp.serialize(txRequest, signature);
+      showResult('0x' + signedHex.toString('hex'));
+    } else {
+      // USDT ERC20
+      const usdtContract = txData.token === 'BNB'
+        ? '0x55d398326f99059ff775485246999027b3197955' // BSC USDT
+        : '0xdac17f958d2ee523a2206206994597c13d831ec7'; // ETH USDT
+
+      const iface = new ethers.utils.Interface([
+        'function transfer(address to, uint amount) returns (bool)'
+      ]);
+      const data = iface.encodeFunctionData('transfer', [to, ethers.utils.parseUnits(amount.toString(), 6)]);
+
+      const txRequest = {
+        from,
+        to: usdtContract,
+        value: '0x0',
+        data,
+        nonce: await provider.getTransactionCount(from, 'latest'),
+        gasLimit: ethers.utils.parseUnits('100000', 0),
+        gasPrice: await provider.getGasPrice(),
+        chainId: txData.chainId,
+        type: 2,
+      };
+
+      // 签名
+      const signedTx = await signer.sendTransaction(txRequest);
+      showResult(signedTx.rawTransaction || signedTx.hash);
+    }
+  } catch(e) {
+    if (e.code === 4001 || e.code === 'ACTION_REJECTED') {
+      setStatus('⚠️ 用户拒绝签名', 'err');
+    } else {
+      setStatus('⚠️ 签名失败: ' + e.message, 'err');
+    }
+    document.getElementById('btn-sign').disabled = false;
+  }
+}
+
+function showResult(hex) {
+  setStatus('✅ 签名成功！', 'ok');
+  document.getElementById('signed-hex').value = hex;
+  document.getElementById('signed-hex-wrap').style.display = 'block';
+
+  // 自动复制
+  navigator.clipboard.writeText(hex).then(() => {
+    setStatus('✅ 签名成功！HEX 已复制到剪贴板，返回 Telegram 粘贴发送', 'ok');
+  }).catch(() => {
+    setStatus('✅ 签名成功！请手动复制上方 HEX 返回 Telegram 粘贴发送', 'ok');
+  });
+}
+
+// 简单的 RLP 打包（用于 ETH 原生签名）
+function require_RLP() {
+  const RLP = {};
+  RLP.serialize = function(tx, signature) {
+    // 使用 ethers 序列化
+    const allBytes = ethers.utils.serializeTransaction(tx, signature);
+    return allBytes;
+  };
+  return RLP;
+}
+
+init().catch(e => setStatus('初始化错误: ' + e.message, 'err'));
+</script>
+</body>
+</html>
