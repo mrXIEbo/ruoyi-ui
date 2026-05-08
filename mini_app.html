@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <title>签名授权</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -76,10 +77,40 @@
     font-size: 12px; resize: vertical; outline: none;
   }
 
+  #qr-container { display: none; text-align: center; }
+  #qr-container canvas { border-radius: 8px; border: 2px solid #2d2d5a; }
+  #wc-uri { display: none; text-align: center; margin-top: 10px; }
+
   #status { text-align: center; font-size: 13px; margin: 10px 0; min-height: 20px; }
   .status-ok { color: #00b894; }
   .status-err { color: #d63031; }
   .status-info { color: #74b9ff; }
+
+  .mode-tabs {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    max-width: 420px;
+    margin-bottom: 16px;
+  }
+  .mode-tab {
+    flex: 1;
+    padding: 10px;
+    border: 1px solid #2d2d5a;
+    border-radius: 8px;
+    background: #16213e;
+    color: #888;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    text-align: center;
+    transition: all .2s;
+  }
+  .mode-tab.active {
+    background: #6c5ce7;
+    color: #fff;
+    border-color: #6c5ce7;
+  }
 
   .note {
     background: #0d0d2b;
@@ -93,12 +124,37 @@
     width: 100%;
     max-width: 420px;
   }
+
+  .telegram-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #0088cc;
+    color: #fff;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    text-decoration: none;
+    margin-top: 8px;
+  }
+
+  .progress-dots {
+    display: inline-block;
+    letter-spacing: 2px;
+  }
 </style>
 </head>
 <body>
 
 <h2>🔐 签名授权</h2>
 <div class="subtitle" id="subtitle">连接钱包后签名转账交易</div>
+
+<div class="mode-tabs" id="mode-tabs" style="display:none">
+  <button class="mode-tab active" id="tab-wc" onclick="switchMode('wc')">📱 手机钱包</button>
+  <button class="mode-tab" id="tab-mm" onclick="switchMode('mm')">🖥️ MetaMask</button>
+</div>
 
 <div class="card" id="tx-card" style="display:none">
   <div class="row">
@@ -125,24 +181,51 @@
 
 <div id="status"></div>
 
-<button class="btn btn-primary" id="btn-connect" onclick="connect()">🔗 连接 MetaMask</button>
-<button class="btn btn-success" id="btn-sign" disabled onclick="sign()">✍️ 签名交易</button>
+<!-- MetaMask mode -->
+<button class="btn btn-primary" id="btn-connect-mm" onclick="connectMM()">🔗 连接 MetaMask</button>
+<button class="btn btn-success" id="btn-sign-mm" disabled onclick="signMM()">✍️ 签名交易</button>
+
+<!-- WalletConnect mode -->
+<div id="wc-panel" style="display:none; width:100%; max-width:420px;">
+  <div id="qr-container">
+    <p style="color:#74b9ff;font-size:13px;margin-bottom:10px">用手机钱包扫码连接</p>
+    <div id="qrcode"></div>
+  </div>
+  <div id="wc-uri">
+    <p style="color:#888;font-size:12px;margin-bottom:6px">连接链接（长按复制）：</p>
+    <textarea id="uri-text" readonly style="width:100%;background:#0d0d2b;color:#74b9ff;border:1px solid #2d2d5a;border-radius:6px;padding:8px;font-family:monospace;font-size:11px;resize:none;outline:none" rows="3"></textarea>
+  </div>
+  <button class="btn btn-primary" id="btn-sign-wc" disabled style="margin-top:12px" onclick="signWC()">✍️ 签名交易</button>
+</div>
 
 <div id="signed-hex-wrap">
-  <label style="font-size:13px;color:#888;margin-bottom:4px;display:block">✅ 签名结果（已复制到剪贴板）：</label>
+  <label style="font-size:13px;color:#888;margin-bottom:4px;display:block">✅ 签名结果：</label>
   <textarea id="signed-hex" readonly></textarea>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button class="btn btn-success" onclick="copyHex()" style="flex:1;font-size:14px;padding:10px">📋 复制 HEX</button>
+    <a id="tg-share-btn" class="telegram-btn" style="flex:1;text-align:center;justify-content:center" href="#" target="_blank">✈️ 发给 Bot</a>
+  </div>
 </div>
 
-<div class="note">
-  💡 签名后，请复制上方显示的 HEX 数据，<br>
-  返回 Telegram 粘贴发送即可。
+<div class="note" id="note">
+  💡 签名后，复制 HEX 返回 Telegram 粘贴发送即可
 </div>
 
-<script>
-let ethers = null;
+<!-- ethers + QR码库（直接 CDN script 标签，无 ESM 兼容问题） -->
+<script src="https://cdn.bootcdn.net/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script type="module">
+// ─── 全局变量 ───
+let ethers = window.ethers;
+let wcProvider = null;
 let txData = null;
-let signer = null;
-let provider = null;
+let mmSigner = null;
+let mmProvider = null;
+let currentMode = null;  // 'wc' | 'mm'
+let signedResult = null;
+
+
+const WC_PROJECT_ID = '4c11228b0ac2b54f319993f814cd1690';
 
 const statusEl = document.getElementById('status');
 
@@ -156,68 +239,357 @@ function fmtAddr(addr) {
   return addr.length > 20 ? addr.slice(0,10)+'...'+addr.slice(-8) : addr;
 }
 
-// ─── 用 <script> 标签加载 ethers.js（多源兜底） ───
-function loadScript(url) {
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = url;
-    s.onload = () => resolve(url);
-    s.onerror = () => { s.remove(); reject(new Error('load fail: ' + url)); };
-    document.head.appendChild(s);
-  });
-}
-
-async function loadEthers() {
-  // 优先国内 CDN
-  const cdnList = [
-    'https://cdn.bootcdn.net/ajax/libs/ethers/5.7.2/ethers.umd.min.js',
-    'https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js',
-    'https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js',
-    'https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js',
-  ];
-
-  for (const url of cdnList) {
-    try {
-      setStatus('加载签名组件...', 'info');
-      await loadScript(url);
-      // UMD 通过 window.ethers 暴露
-      ethers = window.ethers;
-      if (ethers && ethers.utils && typeof ethers.utils.parseEther === 'function') {
-        console.log('ethers loaded from:', url);
-        return;
-      }
-      // 加载了但全局变量不对，清理重试
-      ethers = null;
-    } catch(e) {
-      console.warn('CDN failed:', url, e.message);
-    }
-  }
-  throw new Error('无法加载 ethers.js，请检查网络连接');
-}
-
 // ─── 解析 URL 参数 ───
 function getParam(key) {
   const params = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
   return params.get(key);
 }
 
-async function init() {
-  // 1. 加载 ethers
-  await loadEthers();
+// ─── 模式切换 ───
+function switchMode(mode) {
+  document.getElementById('tab-wc').classList.toggle('active', mode === 'wc');
+  document.getElementById('tab-mm').classList.toggle('active', mode === 'mm');
+  document.getElementById('wc-panel').style.display = mode === 'wc' ? 'block' : 'none';
+  document.getElementById('btn-connect-mm').style.display = mode === 'mm' ? 'block' : 'none';
+  document.getElementById('btn-sign-mm').style.display = mode === 'mm' ? 'block' : 'none';
+  currentMode = mode;
+  if (mode === 'wc' && !wcProvider) {
+    initWC();
+  }
+}
 
-  // 2. 解析交易参数
+// ─── MetaMask ───
+window.connectMM = async function() {
+  if (!window.ethereum) {
+    setStatus('⚠️ 未检测到 MetaMask，请安装插件', 'err');
+    return;
+  }
+  setStatus('正在打开 MetaMask...', 'info');
+  try {
+    mmProvider = new ethers.providers.Web3Provider(window.ethereum);
+    await mmProvider.send('eth_requestAccounts', []);
+    mmSigner = mmProvider.getSigner();
+    const addr = await mmSigner.getAddress();
+    document.getElementById('btn-connect-mm').disabled = true;
+    document.getElementById('btn-connect-mm').textContent = '✅ 已连接: ' + fmtAddr(addr);
+    document.getElementById('btn-sign-mm').disabled = false;
+    setStatus('✅ MetaMask 已连接：' + addr, 'ok');
+  } catch(e) {
+    if (e.code === 4001) setStatus('⚠️ 用户拒绝连接', 'err');
+    else setStatus('⚠️ 连接失败: ' + e.message, 'err');
+  }
+};
+
+window.signMM = async function() {
+  if (!mmProvider || !mmSigner) { setStatus('⚠️ 请先连接钱包', 'err'); return; }
+  await doSign('mm');
+};
+
+// ─── WalletConnect ───
+async function initWC() {
+  setStatus('正在初始化 WalletConnect...', 'info');
+  try {
+    // 动态加载 WC v2 SDK（尝试多个 CDN 兜底）
+    let EthereumProvider = null;
+    const cdnList = [
+      'https://esm.sh/@walletconnect/ethereum-provider@2',
+      'https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2/dist/umd/index.js',
+    ];
+    for (const cdnUrl of cdnList) {
+      try {
+        const mod = await import(cdnUrl);
+        EthereumProvider = mod.default || mod.EthereumProvider || mod;
+        if (EthereumProvider && typeof EthereumProvider.init === 'function') break;
+        EthereumProvider = null;
+      } catch(e) { console.warn('WC CDN failed:', cdnUrl); }
+    }
+    if (!EthereumProvider) throw new Error('无法加载 WalletConnect SDK');
+
+    const chains = getWCChains();
+    wcProvider = await EthereumProvider.init({
+      projectId: WC_PROJECT_ID,
+      chains: chains.map(c => c.id),
+      optionalChains: chains.map(c => c.id),
+      showQrModal: false,   // 我们自己渲染二维码
+      methods: ['eth_sendTransaction', 'personal_sign', 'eth_signTransaction', 'eth_sign', 'eth_signTypedData_v4'],
+      events: ['accountsChanged', 'chainChanged', 'disconnect'],
+      metadata: {
+        name: 'Telegram Transfer Bot',
+        description: 'Sign transaction for Telegram transfer bot',
+        url: location.origin,
+        icons: ['https://telegram.org/img/t_logo.png']
+      }
+    });
+
+    // 注册事件
+    wcProvider.on('connect', (e) => {
+      const addr = e.accounts?.[0];
+      if (addr) {
+        document.getElementById('btn-sign-wc').disabled = false;
+        setStatus('✅ 已连接：' + fmtAddr(addr), 'ok');
+      }
+    });
+    wcProvider.on('disconnect', () => {
+      document.getElementById('btn-sign-wc').disabled = true;
+      setStatus('WalletConnect 已断开', 'info');
+    });
+    wcProvider.on('chainChanged', (chainId) => {
+      console.log('WC chain changed:', chainId);
+    });
+
+    // 连接（生成 URI）
+    await wcProvider.enable();
+    const uri = wcProvider.connector?.uri || wcProvider.uri;
+    if (uri) {
+      showQRCode(uri);
+    } else {
+      setStatus('⚠️ 无法获取 WalletConnect URI', 'err');
+    }
+
+  } catch(e) {
+    console.error('WC init error:', e);
+    if (e.message?.includes('User rejected')) {
+      setStatus('⚠️ 用户拒绝连接', 'err');
+    } else {
+      setStatus('⚠️ WalletConnect 初始化失败: ' + e.message, 'err');
+    }
+  }
+}
+
+function getWCChains() {
+  if (!txData) return [{id: 1, token: 'ETH', rpc: 'https://eth.llamarpc.com', label: 'Ethereum'}];
+  const map = {
+    'ETH':  { id: 1,     token: 'ETH',  rpc: 'https://eth.llamarpc.com',            label: 'Ethereum' },
+    'BSC':  { id: 56,    token: 'BNB',  rpc: 'https://bsc.publicnode.com',            label: 'BNB Chain' },
+  };
+  return [map[txData.chain] || map['ETH']];
+}
+
+// ─── QR 码生成（使用 qrcode.js，直接挂 window.QRCode） ───
+function showQRCode(uri) {
+  const el = document.getElementById('qrcode');
+  el.innerHTML = '';
+
+  if (window.QRCode) {
+    try {
+      const qr = new window.QRCode(el, {
+        text: uri,
+        width: 220,
+        height: 220,
+        colorDark: '#6c5ce7',
+        colorLight: '#16213e',
+        correctLevel: window.QRCode.CorrectLevel.M
+      });
+    } catch(e) {
+      el.innerHTML = '<p style="color:#d63031;font-size:12px">QR 生成失败，请复制下方链接</p>';
+    }
+  } else {
+    el.innerHTML = '<p style="color:#d63031;font-size:12px">QR 库未加载，请复制下方链接</p>';
+  }
+
+  // URI 文本备用（长链接必现）
+  document.getElementById('wc-uri').style.display = 'block';
+  document.getElementById('uri-text').value = uri;
+  document.getElementById('qr-container').style.display = 'block';
+}
+
+// ─── WalletConnect 签名 ───
+window.signWC = async function() {
+  if (!wcProvider) { setStatus('⚠️ 请先连接钱包', 'err'); return; }
+  await doSign('wc');
+};
+
+// ─── 统一签名流程 ───
+async function doSign(mode) {
+  setStatus('请在钱包中确认签名...', 'info');
+  const btnId = mode === 'mm' ? 'btn-sign-mm' : 'btn-sign-wc';
+  document.getElementById(btnId).disabled = true;
+
+  try {
+    const { chain, token, from, to, amount } = txData;
+    const chainId = parseInt(txData.chainId);
+
+    // 验证链
+    const expectedChain = { 'ETH': 1, 'BSC': 56 }[chain];
+    let connectedAddr;
+    let signer;
+
+    if (mode === 'mm') {
+      const network = await mmProvider.getNetwork();
+      if (Number(network.chainId) !== expectedChain) {
+        setStatus(`⚠️ 请先切换 MetaMask 到 ${chain} 网络（ChainID: ${expectedChain}）`, 'err');
+        document.getElementById(btnId).disabled = false;
+        return;
+      }
+      signer = mmSigner;
+      connectedAddr = (await signer.getAddress()).toLowerCase();
+    } else {
+      // WC：切换链（会自动弹出切换请求）
+      try {
+        await wcProvider.request({ method: 'eth_requestAccounts' });
+        const accounts = await wcProvider.request({ method: 'eth_accounts' });
+        connectedAddr = accounts?.[0]?.toLowerCase();
+        if (!connectedAddr) throw new Error('No WC account');
+      } catch(e) {
+        setStatus('⚠️ 请先用钱包扫码连接', 'err');
+        document.getElementById(btnId).disabled = false;
+        return;
+      }
+      // 检查链
+      const wcChainId = await wcProvider.request({ method: 'eth_chainId' });
+      if (parseInt(wcChainId) !== expectedChain) {
+        try {
+          await wcProvider.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: '0x' + expectedChain.toString(16) }]
+          });
+        } catch(e) {
+          if (e.code !== 4902) throw e;
+          // 链未添加，先添加
+          await wcProvider.request({
+            method: 'wallet_addEthereumChain',
+            params: [getChainConfig(expectedChain)]
+          });
+        }
+      }
+      signer = new ethers.providers.Web3Provider(wcProvider).getSigner();
+    }
+
+    // 验证地址匹配
+    if (connectedAddr !== from.toLowerCase()) {
+      setStatus(`⚠️ 钱包地址与发款地址不匹配\n发款：${from}\n连接：${connectedAddr}`, 'err');
+      document.getElementById(btnId).disabled = false;
+      return;
+    }
+
+    // 构建交易
+    const txCount = await signer.getTransactionCount(from, 'latest');
+    const gasPrice = await signer.getGasPrice();
+
+    let txRequest, signedTx;
+    if (token === 'ETH' || token === 'BNB') {
+      txRequest = {
+        from,
+        to,
+        value: ethers.utils.parseEther(amount.toString()),
+        nonce: txCount,
+        gasLimit: 21000,
+        gasPrice: gasPrice,
+        chainId: chainId,
+      };
+      signedTx = await signer.signTransaction(txRequest);
+    } else {
+      // USDT ERC20
+      const usdtContract = chain === 'BSC'
+        ? '0x55d398326f99059ff775485246999027b3197955'
+        : '0xdac17f958d2ee523a2206206994597c13d831ec7';
+      const iface = new ethers.utils.Interface([
+        'function transfer(address to, uint amount) public'
+      ]);
+      const tokenAmount = ethers.utils.parseUnits(amount.toString(), 6);
+      const data = iface.encodeFunctionData('transfer', [to, tokenAmount]);
+      txRequest = {
+        from,
+        to: usdtContract,
+        value: 0,
+        data,
+        nonce: txCount,
+        gasLimit: 100000,
+        gasPrice: gasPrice,
+        chainId: chainId,
+      };
+      signedTx = await signer.signTransaction(txRequest);
+    }
+
+    showResult(signedTx);
+
+  } catch(e) {
+    console.error(e);
+    if (e.code === 4001 || e.code === 'ACTION_REJECTED' || e.message?.includes('rejected')) {
+      setStatus('⚠️ 用户取消签名', 'err');
+    } else {
+      setStatus('⚠️ 签名失败: ' + e.message, 'err');
+    }
+    document.getElementById(btnId).disabled = false;
+  }
+}
+
+function getChainConfig(chainId) {
+  const configs = {
+    1:    { chainId: '0x1',     chainName: 'Ethereum',      rpcUrls: ['https://eth.llamarpc.com'],        nativeCurrency: { name: 'Ether',   symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://etherscan.io'] },
+    56:   { chainId: '0x38',    chainName: 'BNB Smart Chain', rpcUrls: ['https://bsc.publicnode.com'],      nativeCurrency: { name: 'BNB',     symbol: 'BNB', decimals: 18 }, blockExplorerUrls: ['https://bscscan.com'] },
+  };
+  return configs[chainId] || configs[1];
+}
+
+function showResult(hex) {
+  signedResult = hex;
+  document.getElementById('signed-hex').value = hex;
+  document.getElementById('signed-hex-wrap').style.display = 'block';
+
+  const botUsername = getParam('bot') || '';
+  const tgUrl = botUsername ? `https://t.me/${botUsername}?text=${encodeURIComponent(hex)}` : null;
+  const tgBtn = document.getElementById('tg-share-btn');
+  if (tgUrl) {
+    tgBtn.href = tgUrl;
+    tgBtn.style.display = 'inline-flex';
+  } else {
+    tgBtn.style.display = 'none';
+  }
+
+  // 自动复制
+  navigator.clipboard.writeText(hex).then(async () => {
+    setStatus('✅ 签名成功！HEX 已复制到剪贴板', 'ok');
+    // Telegram WebApp 模式下：自动关闭并提示用户粘贴
+    if (window.Telegram?.WebApp) {
+      try {
+        window.Telegram.WebApp.ready();
+        const mainBtn = window.Telegram.WebApp.MainButton;
+        mainBtn.setText('✅ 已复制，返回 Bot 粘贴发送');
+        mainBtn.show();
+        mainBtn.onClick(() => {
+          window.Telegram.WebApp.close();
+        });
+      } catch(e) { console.warn('TG WebApp error:', e); }
+    }
+  }).catch(() => {
+    setStatus('✅ 签名成功！请手动复制 HEX 返回 Bot', 'ok');
+  });
+}
+
+window.copyHex = function() {
+  const hex = document.getElementById('signed-hex').value;
+  if (!hex) return;
+  navigator.clipboard.writeText(hex).then(() => {
+    setStatus('✅ HEX 已复制到剪贴板', 'ok');
+  });
+};
+
+// ─── 初始化 ───
+async function init() {
+  // 检查 ethers 是否加载
+  if (!ethers || !ethers.utils) {
+    setStatus('加载签名组件...', 'info');
+    // ethers 应该已经通过 <script> 标签加载
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    ethers = window.ethers;
+    if (!ethers || !ethers.utils) {
+      setStatus('⚠️ 签名组件加载失败，请刷新重试', 'err');
+      return;
+    }
+  }
+
+  // 解析交易参数
   const encoded = getParam('tx');
   if (!encoded) {
     setStatus('⚠️ 未找到交易参数，请从 Telegram 重新发起', 'err');
     return;
   }
-
   try {
     txData = JSON.parse(atob(encoded));
   } catch(e) {
     try {
-      const padded = encoded.replace(/-/g, '+').replace(/_/g, '/');
-      txData = JSON.parse(atob(padded));
+      txData = JSON.parse(atob(encoded.replace(/-/g, '+').replace(/_/g, '/')));
     } catch(e2) {
       setStatus('⚠️ 交易参数解析失败', 'err');
       return;
@@ -231,137 +603,23 @@ async function init() {
   document.getElementById('tx-to').textContent = fmtAddr(txData.to);
   document.getElementById('tx-amount').textContent = txData.amount + ' ' + txData.token;
 
-  setStatus('请先连接 MetaMask', 'info');
-}
+  // 检测设备类型 + MetaMask 是否存在，决定默认模式
+  const hasMM = !!window.ethereum;
+  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
 
-async function connect() {
-  if (!window.ethereum) {
-    setStatus('⚠️ 未检测到 MetaMask，请先安装 MetaMask 插件', 'err');
-    return;
+  if (isMobile || !hasMM) {
+    // 手机：默认 WC 模式
+    switchMode('wc');
+  } else {
+    // 桌面有 MetaMask：默认 MM 模式，显示切换标签
+    document.getElementById('mode-tabs').style.display = 'flex';
+    switchMode('mm');
   }
 
-  setStatus('正在打开 MetaMask...', 'info');
-  try {
-    provider = new ethers.providers.Web3Provider(window.ethereum);
-    await provider.send('eth_requestAccounts', []);
-
-    signer = provider.getSigner();
-    const addr = await signer.getAddress();
-
-    document.getElementById('btn-connect').disabled = true;
-    document.getElementById('btn-connect').textContent = '✅ 已连接: ' + fmtAddr(addr);
-    document.getElementById('btn-sign').disabled = false;
-    setStatus('✅ MetaMask 已连接：' + addr, 'ok');
-  } catch(e) {
-    if (e.code === 4001) {
-      setStatus('⚠️ 用户拒绝连接', 'err');
-    } else {
-      setStatus('⚠️ 连接失败: ' + e.message, 'err');
-    }
-  }
+  setStatus('请选择连接方式并签名', 'info');
 }
 
-async function sign() {
-  if (!provider || !signer) {
-    setStatus('⚠️ 请先连接钱包', 'err');
-    return;
-  }
-
-  setStatus('请在 MetaMask 中确认签名...', 'info');
-  document.getElementById('btn-sign').disabled = true;
-
-  try {
-    const chain  = txData.chain;
-    const from   = txData.from;
-    const to     = txData.to;
-    const amount = txData.amount;
-    const token  = txData.token;
-
-    // 验证链
-    const expectedChain = { 'ETH': 1, 'BSC': 56 }[chain];
-    if (expectedChain) {
-      const network = await provider.getNetwork();
-      if (Number(network.chainId) !== expectedChain) {
-        setStatus(`⚠️ 请先切换 MetaMask 到 ${chain} 网络（ID: ${expectedChain}）`, 'err');
-        document.getElementById('btn-sign').disabled = false;
-        return;
-      }
-    }
-
-    // 验证地址
-    const connectedAddr = (await signer.getAddress()).toLowerCase();
-    if (connectedAddr !== from.toLowerCase()) {
-      setStatus(`⚠️ 钱包地址与发款地址不匹配\n发款：${from}\n连接：${connectedAddr}`, 'err');
-      document.getElementById('btn-sign').disabled = false;
-      return;
-    }
-
-    const txCount = await provider.getTransactionCount(from, 'latest');
-    const gasPrice = await provider.getGasPrice();
-    const chainId = parseInt(txData.chainId);
-
-    if (token === 'ETH' || token === 'BNB') {
-      // ── 原生币 ──
-      const txRequest = {
-        from,
-        to,
-        value: ethers.utils.parseEther(amount.toString()),
-        nonce: txCount,
-        gasLimit: 21000,
-        gasPrice: gasPrice,
-        chainId: chainId,
-      };
-      const signature = await signer.signTransaction(txRequest);
-      const signedHex = ethers.utils.serializeTransaction(txRequest, signature);
-      showResult(signedHex);
-    } else {
-      // ── USDT ERC20 ──
-      const usdtContract = chain === 'BSC'
-        ? '0x55d398326f99059ff775485246999027b3197955'
-        : '0xdac17f958d2ee523a2206206994597c13d831ec7';
-
-      const iface = new ethers.utils.Interface([
-        'function transfer(address to, uint amount) public'
-      ]);
-      // USDT 是 6 位小数
-      const tokenAmount = ethers.utils.parseUnits(amount.toString(), 6);
-      const data = iface.encodeFunctionData('transfer', [to, tokenAmount]);
-
-      const txRequest = {
-        from,
-        to: usdtContract,
-        value: ethers.constants.Zero,
-        data,
-        nonce: txCount,
-        gasLimit: 100000,
-        gasPrice: gasPrice,
-        chainId: chainId,
-      };
-      const signedTx = await signer.signTransaction(txRequest);
-      showResult(signedTx);
-    }
-  } catch(e) {
-    console.error(e);
-    if (e.code === 4001 || e.code === 'ACTION_REJECTED') {
-      setStatus('⚠️ 用户取消签名', 'err');
-    } else {
-      setStatus('⚠️ 签名失败: ' + e.message, 'err');
-    }
-    document.getElementById('btn-sign').disabled = false;
-  }
-}
-
-function showResult(hex) {
-  setStatus('✅ 签名成功！', 'ok');
-  document.getElementById('signed-hex').value = hex;
-  document.getElementById('signed-hex-wrap').style.display = 'block';
-  navigator.clipboard.writeText(hex).then(() => {
-    setStatus('✅ 签名成功！HEX 已复制到剪贴板，返回 Telegram 粘贴', 'ok');
-  }).catch(() => {
-    setStatus('✅ 签名成功！请手动复制 HEX 返回 Telegram', 'ok');
-  });
-}
-
+// 等待 DOM 加载完成
 init().catch(e => setStatus('初始化错误: ' + e.message, 'err'));
 </script>
 </body>
