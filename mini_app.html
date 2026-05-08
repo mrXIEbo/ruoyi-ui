@@ -401,6 +401,10 @@ window.signWC = async function() {
 
 // ─── 统一签名流程 ───
 async function doSign(mode) {
+  if (!txData || !txData.chain) {
+    setStatus('⚠️ 交易数据丢失，请重新从 Telegram 发起签名', 'err');
+    return;
+  }
   setStatus('请在钱包中确认签名...', 'info');
   const btnId = mode === 'mm' ? 'btn-sign-mm' : 'btn-sign-wc';
   document.getElementById(btnId).disabled = true;
